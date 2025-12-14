@@ -1,0 +1,946 @@
+//***********************************************************function start*******************************************************************************************
+//landsat8去云去雪 
+function maskCloudsL8(image) {
+    var qa = image.select('QA_PIXEL');
+    
+    // 创建云和云阴影的掩膜
+    var cloudMask = qa.bitwiseAnd(1 << 1) // Dilated cloud
+                    .or(qa.bitwiseAnd(1 << 2)) // Cirrus
+                    .or(qa.bitwiseAnd(1 << 3)) // Cloud
+                    .or(qa.bitwiseAnd(1 << 4))// Cloud shadow
+                    .or(qa.bitwiseAnd(1<<5));//Snow 
+    
+    // 更新并返回去除云和云阴影的影像
+    return image.updateMask(cloudMask.not());
+}
+
+//landsat8 亮度值转换为反射率
+function l8dn2sr(img){
+  img=ee.Image(img);
+  
+  // 定义缩放因子和偏移量，例如，针对第一波段（波段 1）的示例
+  var scaleFactors = [0.0000275, 0.0000275,0.0000275,0.0000275,0.0000275,0.0000275]; // 缩放因子
+  var offsets = [-0.2,-0.2,-0.2,-0.2,-0.2,-0.2]; // 偏移量
+  
+  var l8_Sr_transformed = img.multiply(ee.Image(scaleFactors)).add(ee.Image(offsets));
+  
+  return l8_Sr_transformed;
+}
+
+
+//OLI标定到ETM
+function sr_OLI2ETM(img){
+  img=ee.Image(img);
+  
+  // 定义缩放因子和偏移量，例如，针对第一波段（波段 1）的示例
+  var scaleFactors = [0.8850, 0.9317, 0.9372, 0.8339, 0.8639, 0.9165]; // 缩放因子
+  var offsets = [0.0183, 0.0123, 0.0123, 0.0448, 0.0306, 0.0116]; // 偏移量
+  
+  // 对每个波段进行线性变换
+  var l8_Sr_transformed = img.multiply(ee.Image(scaleFactors)).add(ee.Image(offsets));
+  
+  return l8_Sr_transformed;
+}
+
+//基于中位数剔除异常最大值后最大ndvi合成 
+function composite_based_ndvi_med(imgcol){
+  var ndvi_mdeian=imgcol.select('ndvi').median();
+  var ndvi_75=imgcol.select('ndvi').reduce(ee.Reducer.percentile({
+    percentiles:[75],
+    maxRaw:15
+  }));
+  var ndvi_max=ndvi_mdeian.add((ndvi_mdeian.subtract(ndvi_75)).abs().multiply(1.8));
+  
+  var mvc_20203=imgcol.map(function(img){
+    img=ee.Image(img);
+    var this_ndvi=img.select('ndvi');
+    var mask=(this_ndvi.gt(ndvi_max));
+    mask=mask.not()
+    return img.updateMask(mask);
+  })
+  mvc_20203=mvc_20203.qualityMosaic('ndvi');
+  return mvc_20203;
+}
+
+//计算生长季反照率、植被、土壤指标
+function cal_indexes(image){
+ 
+  image=ee.Image(image).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi']); 
+  //albedo
+  var albedo=image.expression(
+    "0.356*B+0.130*R+0.373*NIR+0.085*SWIR1+0.072*SWIR2-0.0018",
+    {
+      "B":image.select('B'),
+      "R":image.select('R'),
+      "NIR":image.select('NIR'),
+      "SWIR1":image.select('SWIR1'),
+      "SWIR2":image.select('SWIR2')
+    }
+    ).rename('albedo');
+  
+  //RVI
+  var rvi=image.expression(
+    "R/NIR",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR")  // NIR
+    }
+    ).rename('rvi');
+  
+  
+  //DVI
+  var dvi= image.expression(
+    "NIR-R",
+    {
+     "NIR":image.select("NIR"), //NIR
+     "R": image.select("R") //Red
+    }
+    ).rename('dvi');
+  
+  // SAVI (Soil-Adjusted Vegetation Index)
+  var savi = image.expression(
+    "((NIR - R) / (NIR + R + L)) * (1.0 + L)",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR"),  // NIR
+      "L":0.5 // 土壤调节系数，可以根据数据源调整
+    }
+  ).rename('savi');
+  
+  // MSAVI (Modified Soil-Adjusted Vegetation Index)
+  var msavi = image.expression(
+    "(2 * NIR + 1 - sqrt((2 * NIR + 1) * (2 * NIR + 1) - 8 * (NIR - R))) / 2",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR")  // NIR
+    }
+  ).rename('msavi');
+  
+  // EVI (Enhanced Vegetation Index)
+  var evi = image.expression(
+    "2.5 * ((NIR - R) / (NIR + C1 * R - C2 * B + L))",
+    {
+      "B": image.select("B"), // Blue
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR"),  // NIR
+      "C1":6,// 大气调节参数
+      "C2":8,// 大气调节参数
+      "L":1 //L 土壤调节系数，可以根据数据源调整
+    }
+  ).rename('evi');
+  
+
+  // BSI (Bare Soil Index)
+  var bsi = image.expression(
+    "((SWIR2+R)-(NIR+B)) / ((SWIR2 + R)+(NIR+B))",
+    {
+      "B": image.select("B"), //BLUE
+      "R": image.select("R"), //RED
+      "NIR": image.select("NIR"), //NIR
+      "SWIR2": image.select("SWIR2")  // SWIR2
+    }
+  ).rename('bsi');
+  
+  // DBSI (Dry Bare Soil Index)
+  var dbsi = image.expression(
+    "(SWIR1-G)/(SWIR1+G)-(NIR-R)/(NIR+R)",
+    {
+      "G": image.select("G"),   // GREEN
+      "R": image.select("R"),  //RED
+      "NIR": image.select("NIR"),  //NIR
+      "SWIR1": image.select("SWIR1") // SWIR1
+    }
+  ).rename('dbsi');
+  
+  //MBI modified bare soil index
+  var mbi=image.expression(
+    "(SWIR1-SWIR2-NIR)/(SWIR1+SWIR2+NIR)+0.5",
+    {
+      "NIR":image.select("NIR"), //NIR
+      "SWIR1":image.select("SWIR1"), //SWIR1
+      "SWIR2":image.select("SWIR2"), //SWIR2
+    }
+    ).rename('mbi');
+  
+  
+  // TGSI 表土粒度指数
+  var tgsi = image.expression(
+    " (R-B)/ (R + G + B)", 
+    {
+      "B": image.select("B"), // BLUE
+      "G": image.select("G"),//GREEN
+      "R": image.select("R")  // RED
+    }
+  ).rename('tgsi');
+  
+  
+  
+  // NDMI:归一化土壤湿度指数
+  var ndmi=image.expression(
+    "(NIR-SWIR1)/(NIR+SWIR1)",
+    {
+      "NIR":image.select("NIR"), //NIR
+      "SWIR1": image.select("SWIR1") //SWIR1
+    }
+    ).rename('ndmi');
+    //SI:盐分指数
+    var si=image.expression(
+      "sqrt(BLUE*RED)",
+      {
+        "BLUE":image.select("B"), //BLUE
+        "RED": image.select("R") //RED
+      }
+      ).rename('si');
+    
+    return image.addBands(albedo).addBands(rvi).addBands(dvi).addBands(evi).addBands(savi).addBands(msavi)
+    .addBands(bsi).addBands(dbsi).addBands(mbi).addBands(tgsi).addBands(ndmi).addBands(si);
+}
+
+//计算非生长季反照率、植被、土壤指标
+function cal_indexes_non_growing(image){
+
+  image=ee.Image(image).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi']); 
+  //albedo
+  var albedo=image.expression(
+    "0.356*B+0.130*R+0.373*NIR+0.085*SWIR1+0.072*SWIR2-0.0018",
+    {
+      "B":image.select('B'),
+      "R":image.select('R'),
+      "NIR":image.select('NIR'),
+      "SWIR1":image.select('SWIR1'),
+      "SWIR2":image.select('SWIR2')
+    }
+    ).rename('n_albedo');
+  
+  //RVI
+  var rvi=image.expression(
+    "R/NIR",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR")  // NIR
+    }
+    ).rename('n_rvi');
+  
+  
+  //DVI
+  var dvi= image.expression(
+    "NIR-R",
+    {
+     "NIR":image.select("NIR"), //NIR
+     "R": image.select("R") //Red
+    }
+    ).rename('n_dvi');
+  
+  // SAVI (Soil-Adjusted Vegetation Index)
+  var savi = image.expression(
+    "((NIR - R) / (NIR + R + L)) * (1.0 + L)",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR"),  // NIR
+      "L":0.5 // 土壤调节系数，可以根据数据源调整
+    }
+  ).rename('n_savi');
+  
+  // MSAVI (Modified Soil-Adjusted Vegetation Index)
+  var msavi = image.expression(
+    "(2 * NIR + 1 - sqrt((2 * NIR + 1) * (2 * NIR + 1) - 8 * (NIR - R))) / 2",
+    {
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR")  // NIR
+    }
+  ).rename('n_msavi');
+  
+  // EVI (Enhanced Vegetation Index)
+  var evi = image.expression(
+    "2.5 * ((NIR - R) / (NIR + C1 * R - C2 * B + L))",
+    {
+      "B": image.select("B"), // Blue
+      "R": image.select("R"), // Red
+      "NIR": image.select("NIR"),  // NIR
+      "C1":6,// 大气调节参数
+      "C2":8,// 大气调节参数
+      "L":1 //L 土壤调节系数，可以根据数据源调整
+    }
+  ).rename('n_evi');
+  
+
+  // BSI (Bare Soil Index)
+  var bsi = image.expression(
+    "((SWIR2+R)-(NIR+B)) / ((SWIR2 + R)+(NIR+B))",
+    {
+      "B": image.select("B"), //BLUE
+      "R": image.select("R"), //RED
+      "NIR": image.select("NIR"), //NIR
+      "SWIR2": image.select("SWIR2")  // SWIR2
+    }
+  ).rename('n_bsi');
+  
+  // DBSI (Dry Bare Soil Index)
+  var dbsi = image.expression(
+    "(SWIR1-G)/(SWIR1+G)-(NIR-R)/(NIR+R)",
+    {
+      "G": image.select("G"),   // GREEN
+      "R": image.select("R"),  //RED
+      "NIR": image.select("NIR"),  //NIR
+      "SWIR1": image.select("SWIR1") // SWIR1
+    }
+  ).rename('n_dbsi');
+  
+  //MBI modified bare soil index
+  var mbi=image.expression(
+    "(SWIR1-SWIR2-NIR)/(SWIR1+SWIR2+NIR)+0.5",
+    {
+      "NIR":image.select("NIR"), //NIR
+      "SWIR1":image.select("SWIR1"), //SWIR1
+      "SWIR2":image.select("SWIR2"), //SWIR2
+    }
+    ).rename('n_mbi');
+  
+  
+  // TGSI 表土粒度指数
+  var tgsi = image.expression(
+    " (R-B)/ (R + G + B)",
+    {
+      "B": image.select("B"), // BLUE
+      "G": image.select("G"),//GREEN
+      "R": image.select("R")  // RED
+    }
+  ).rename('n_tgsi');
+  
+  
+  
+  // NDMI:归一化土壤湿度指数
+  var ndmi=image.expression(
+    "(NIR-SWIR1)/(NIR+SWIR1)",
+    {
+      "NIR":image.select("NIR"), //NIR
+      "SWIR1": image.select("SWIR1") //SWIR1
+    }
+    ).rename('n_ndmi');
+    //SI:盐分指数
+    var si=image.expression(
+      "sqrt(BLUE*RED)",
+      {
+        "BLUE":image.select("B"), //BLUE
+        "RED": image.select("R") //RED
+      }
+      ).rename('n_si');
+    
+    return image.addBands(albedo).addBands(rvi).addBands(dvi).addBands(evi).addBands(savi).addBands(msavi)
+    .addBands(bsi).addBands(dbsi).addBands(mbi).addBands(tgsi).addBands(ndmi).addBands(si)
+    .rename(['n_B','n_G','n_R','n_NIR','n_SWIR1','n_SWIR2','n_ndvi','n_albedo','n_rvi','n_dvi','n_evi','n_savi','n_msavi','n_bsi','n_dbsi','n_mbi','n_tgsi','n_ndmi','n_si']);
+}
+
+//计算纹理特征2
+function cal_indexes_texture2(image){
+  image=ee.Image(image).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi'])
+  var gray=image.expression("0.3*R+0.59*G+0.11*B",
+  {
+    'B':image.select('B'),
+    'G':image.select('G'),
+    'R':image.select('R')
+  }).rename('gray');
+  
+  gray=gray.multiply(255).toInt16();
+  print('gray',gray);
+  var size1=5;
+  var size2=15;
+  var size3=30;
+  
+  var kernel_30m=ee.Kernel.fixed({
+    'width':3,
+    'height':3,
+    'weights':ee.List([[0,1,0],[1,0,1],[0,1,0]])
+  });
+
+  var kernel_90m=ee.Kernel.fixed({
+    'width':7,
+    'height':7,
+    'weights':ee.List([[0,0,0,1,0,0,0],[0,0,0,0,0,0,0],[0,0,0,0,0,0,0],[1,0,0,0,0,0,1],[0,0,0,0,0,0,0],[0,0,0,0,0,0,0],[0,0,0,1,0,0,0]])
+  });
+  
+  // var wl1=gray.glcmTexture({
+  //   'size':size1,
+  //   'kernel':kernel_30m,
+  //   'average':false
+  // });
+  
+  //   var wl2=gray.glcmTexture({
+  //   'size':size2,
+  //   'kernel':kernel_30m,
+  //   'average':false
+  // });
+  
+    var wl3=gray.glcmTexture({
+    'size':size3,
+    'kernel':kernel_30m,
+    'average':false
+  });
+  
+  //   var wl4=gray.glcmTexture({
+  //   'size':size1,
+  //   'kernel':kernel_90m,
+  //   'average':false
+  // });
+  
+  //   var wl5=gray.glcmTexture({
+  //   'size':size2,
+  //   'kernel':kernel_90m,
+  //   'average':false
+  // });
+  
+    var wl6=gray.glcmTexture({
+    'size':size3,
+    'kernel':kernel_90m,
+    'average':false
+  });
+
+  
+  // var v1_extracted=wl1.select(['gray_corr_0_-1','gray_idm_0_-1','gray_ent_0_-1','gray_corr_-1_0','gray_idm_-1_0','gray_ent_-1_0'])
+  // .rename(['V1_corr','V1_hom','V1_ent','H1_corr','H1_hom','H1_ent']);
+  // var v2_extracted=wl2.select(['gray_corr_0_-1','gray_idm_0_-1','gray_ent_0_-1','gray_corr_-1_0','gray_idm_-1_0','gray_ent_-1_0'])
+  // .rename(['V2_corr','V2_hom','V2_ent','H2_corr','H2_hom','H2_ent']);
+  var v3_extracted=wl3.select(['gray_corr_0_-1','gray_idm_0_-1','gray_ent_0_-1','gray_corr_-1_0','gray_idm_-1_0','gray_ent_-1_0'])
+  .rename(['V3_corr','V3_hom','V3_ent','H3_corr','H3_hom','H3_ent']);
+  // var v4_extracted=wl4.select(['gray_corr_0_-3','gray_idm_0_-3','gray_ent_0_-3','gray_corr_-3_0','gray_idm_-3_0','gray_ent_-3_0'])
+  // .rename(['V4_corr','V4_hom','V4_ent','H4_corr','H4_hom','H4_ent']);
+  // var v5_extracted=wl5.select(['gray_corr_0_-3','gray_idm_0_-3','gray_ent_0_-3','gray_corr_-3_0','gray_idm_-3_0','gray_ent_-3_0'])
+  // .rename(['V5_corr','V5_hom','V5_ent','H5_corr','H5_hom','H5_ent']);
+  var v6_extracted=wl6.select(['gray_corr_0_-3','gray_idm_0_-3','gray_ent_0_-3','gray_corr_-3_0','gray_idm_-3_0','gray_ent_-3_0'])
+  .rename(['V6_corr','V6_hom','V6_ent','H6_corr','H6_hom','H6_ent']);
+  
+  // var wl_final=v1_extracted.addBands(v2_extracted).addBands(v3_extracted).addBands(v4_extracted).addBands(v5_extracted).addBands(v6_extracted);
+  var wl_final=v3_extracted.addBands(v6_extracted);
+
+  return wl_final;
+  
+}
+
+
+//k折随机森林分类
+function single_class(samples,img,label_name,features,numberOfTrees,bag){
+  var k =5;
+  var size=samples.size();
+  
+  samples=samples.toList(size).zip(ee.List.sequence(1,size,1)).map(function(feature_i){
+    var feature=ee.Feature(ee.List(feature_i).get(0));
+    var i=ee.Feature(ee.List(feature_i).get(1));
+    
+    return feature.set({'fold_id':ee.Number(i).mod(k)});
+  });
+  samples=ee.FeatureCollection(samples);
+  
+  
+  // 设置随机森林分类的参数
+  var classifierOptions = {
+    numberOfTrees: numberOfTrees,
+    //variablesPerSplit: 2,
+    minLeafPopulation: 1,
+    bagFraction: bag
+  };
+  
+  var k_fold_class_info=ee.List.sequence(0,ee.Number(k).subtract(1),1).map(function(i){
+    var train = samples.filter(ee.Filter.neq('fold_id', i));
+    var test = samples.filter(ee.Filter.eq('fold_id', i));
+    
+    var trainedClassifier = ee.Classifier.smileRandomForest(classifierOptions).train({
+      features: train,
+      classProperty: label_name,
+      inputProperties :features
+    });
+    
+    var train_predicted=train.classify(trainedClassifier);
+    var test_predicted=test.classify(trainedClassifier);
+    
+    var predicted = test.classify(trainedClassifier);
+    
+    // 计算混淆矩阵
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,3,4]);
+    var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,3,4]);
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2]);
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,4]);
+        
+    var mean_consumersAccuracy=confusionMatrix.consumersAccuracy().reduce(ee.Reducer.mean(),[1]).get([0,0]);
+    var mean_producersAccuracy=confusionMatrix.producersAccuracy().reduce(ee.Reducer.mean(),[0]).get([0,0]);
+    
+    var f1=confusionMatrix.fscore();
+    var f1_mean=f1.reduce(ee.Reducer.mean(),[0]).get([0]);
+    
+    var accuracy = confusionMatrix.accuracy();
+    
+    var importance = ee.Dictionary(trainedClassifier.explain().get('importance'));
+    var sorted_importance = importance.values().zip(importance.keys()).sort(importance.values());
+    var kappa=confusionMatrix.kappa();
+    
+    return ee.Dictionary({
+      'classifier':trainedClassifier,
+      'f1score':f1_mean,
+      'oa':accuracy,
+      'kappa':kappa,
+      'importance':sorted_importance,
+      'matrix':confusionMatrix,
+      'train_sample':train_predicted,
+      'test_sample':test_predicted
+    });
+  
+  })
+  
+  
+  print('k_fold_class_info',k_fold_class_info);
+  
+  var f1score_list=k_fold_class_info.map(function(info){
+    return ee.Dictionary(info).get('f1score');
+  });
+  
+  var oa_list=k_fold_class_info.map(function(info){
+    return ee.Dictionary(info).get('oa');
+  });
+  
+  // print('f1score_list',f1score_list);
+   
+  
+  var max_f1score=ee.Array(f1score_list).reduce(ee.Reducer.max(),[0]).get([0]);
+  // var max_f1score=ee.Array(oa_list).reduce(ee.Reducer.max(),[0]).get([0]);
+  var index_max_f1score=f1score_list.indexOf(max_f1score);
+  
+  var bestclassifier=ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('classifier');
+  
+  var classified = img.classify(bestclassifier);
+  
+  var class_res=ee.Image(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('class_res'));
+  
+  var train_sample=ee.FeatureCollection(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('train_sample'));
+  var test_sample=ee.FeatureCollection(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('test_sample'));
+  
+  // print('bestclassifier',bestclassifier);
+  // return ee.Dictionary({'classinfo':k_fold_class_info.get(index_max_f1score)});
+  return ee.Dictionary({
+    'res':classified,
+    'classinfo':k_fold_class_info.get(index_max_f1score),
+    'classifier':bestclassifier,
+    'train_sample':train_sample,
+    'test_sample':test_sample
+  });
+}
+
+//k折随机森林分类
+function single_class_v2(samples,img,label_name,features,numberOfTrees,bag){
+  var k =5;
+  var samples_2019=samples.filter(ee.Filter.expression("YBNF==2019"));
+  var size=samples_2019.size();
+
+
+  var samples_2019_v2=samples_2019.toList(size).zip(ee.List.sequence(1,size,1)).map(function(feature_i){
+    var feature=ee.Feature(ee.List(feature_i).get(0));
+    var i=ee.Feature(ee.List(feature_i).get(1));
+    
+    return feature.set({'fold_id':ee.Number(i).mod(k)});
+  });
+  samples_2019_v2=ee.FeatureCollection(samples_2019_v2);
+  
+  
+  // 设置随机森林分类的参数
+  var classifierOptions = {
+    numberOfTrees: numberOfTrees,
+    //variablesPerSplit: 2,
+    minLeafPopulation: 1,
+    bagFraction: bag
+  };
+  
+  var k_fold_class_info=ee.List.sequence(0,ee.Number(k).subtract(1),1).map(function(i){
+    var train_2019 = samples_2019_v2.filter(ee.Filter.neq('fold_id', i));
+    var test_2019 = samples_2019_v2.filter(ee.Filter.eq('fold_id', i));
+    
+    var train_2019_size=train_2019.size();
+    var test_2019_size=test_2019.size();
+
+    var train_point_id2=train_2019.toList(train_2019_size).map(function(element){return ee.Feature(element).get('point_id2')});
+    var test_point_id2=test_2019.toList(test_2019_size).map(function(element){return ee.Feature(element).get('point_id2')});
+    
+    var train = samples.filter(ee.Filter.inList('point_id2',train_point_id2));
+    var test = samples.filter(ee.Filter.inList('point_id2',test_point_id2));
+    
+    var trainedClassifier = ee.Classifier.smileRandomForest(classifierOptions).train({
+      features: train,
+      classProperty: label_name,
+      inputProperties :features
+    });
+    
+    var train_predicted=train.classify(trainedClassifier);
+    var test_predicted=test.classify(trainedClassifier);
+    
+    var predicted = test.classify(trainedClassifier);
+    
+    // 计算混淆矩阵
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,3,4]);
+    var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,3,4]);
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2]);
+    // var confusionMatrix = predicted.errorMatrix(label_name, 'classification',[1,2,4]);
+        
+    var mean_consumersAccuracy=confusionMatrix.consumersAccuracy().reduce(ee.Reducer.mean(),[1]).get([0,0]);
+    var mean_producersAccuracy=confusionMatrix.producersAccuracy().reduce(ee.Reducer.mean(),[0]).get([0,0]);
+    
+    var f1=confusionMatrix.fscore();
+    var f1_mean=f1.reduce(ee.Reducer.mean(),[0]).get([0]);
+    
+    var accuracy = confusionMatrix.accuracy();
+    
+    var importance = ee.Dictionary(trainedClassifier.explain().get('importance'));
+    var sorted_importance = importance.values().zip(importance.keys()).sort(importance.values());
+    var kappa=confusionMatrix.kappa();
+    
+    return ee.Dictionary({
+      'classifier':trainedClassifier,
+      'f1score':f1_mean,
+      'oa':accuracy,
+      'kappa':kappa,
+      'importance':sorted_importance,
+      'matrix':confusionMatrix,
+      'train_sample':train_predicted,
+      'test_sample':test_predicted
+    });
+  
+  })
+  
+  
+  print('k_fold_class_info',k_fold_class_info);
+  
+  var f1score_list=k_fold_class_info.map(function(info){
+    return ee.Dictionary(info).get('f1score');
+  });
+  
+  var oa_list=k_fold_class_info.map(function(info){
+    return ee.Dictionary(info).get('oa');
+  });
+  
+  // print('f1score_list',f1score_list);
+   
+  
+  var max_f1score=ee.Array(f1score_list).reduce(ee.Reducer.max(),[0]).get([0]);
+  // var max_f1score=ee.Array(oa_list).reduce(ee.Reducer.max(),[0]).get([0]);
+  var index_max_f1score=f1score_list.indexOf(max_f1score);
+  
+  var bestclassifier=ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('classifier');
+  
+  var classified = img.classify(bestclassifier);
+  
+  var class_res=ee.Image(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('class_res'));
+  
+  var train_sample=ee.FeatureCollection(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('train_sample'));
+  var test_sample=ee.FeatureCollection(ee.Dictionary(k_fold_class_info.get(index_max_f1score)).get('test_sample'));
+  
+  // print('bestclassifier',bestclassifier);
+  // return ee.Dictionary({'classinfo':k_fold_class_info.get(index_max_f1score)});
+  return ee.Dictionary({
+    'res':classified,
+    'classinfo':k_fold_class_info.get(index_max_f1score),
+    'classifier':bestclassifier,
+    'train_sample':train_sample,
+    'test_sample':test_sample
+  });
+}
+
+
+//*********************************************************function end************************************************************************************************
+//0：（1）设置研究区范围：三北（需要根据具体情况修改）
+var roi=GCL2020_China_buffers;
+//0：（2）设置年份（需要根据具体情况修改）
+var year=2024;
+//（需要根据具体情况修改）
+//0：（3）设置输入影像：2000-2013年用Landsat-5/7，2014以后用Landsat-8，若选前者，不需要.map(sr_OLI2ETM)  总共6个
+var landsat_sr=l8_sr.select(['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7','QA_PIXEL']).map(function(img){return img.rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL'])});
+// var landsat_sr=(l5_sr.merge(l7_sr)).select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7','QA_PIXEL']).map(function(img){return img.rename(['B','G','R','NIR','SWIR1','SWIR2','QA_PIXEL'])});
+
+//1：（1）合成当年生长季最大ndvi影像
+var start_date=ee.Date.fromYMD(year,7,1);
+var end_date=ee.Date.fromYMD(year,9,30);
+var lat8_col=landsat_sr.filterDate(start_date,end_date).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_2020=composite_based_ndvi_med(lat8_col);
+
+//1：（2）合成前一年生长季最大ndvi影像
+var start_date_last_year=ee.Date.fromYMD(year,7,1).advance(-1,'year');
+var end_date_last_year=ee.Date.fromYMD(year,9,30).advance(-1,'year');
+var lat8_col_last_year=landsat_sr.filterDate(start_date_last_year,end_date_last_year).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_grow_last_year=composite_based_ndvi_med(lat8_col_last_year);
+
+//1：（3）合成后一年生长季最大ndvi影像
+var start_date_next_year=ee.Date.fromYMD(year,7,1).advance(1,'year');
+var end_date_next_year=ee.Date.fromYMD(year,9,30).advance(1,'year');
+var lat8_col_next_year=landsat_sr.filterDate(start_date_next_year,end_date_next_year).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_grow_next_year=composite_based_ndvi_med(lat8_col_next_year);
+
+//1：（4）当年生长季最大ndvi影像缺失的像素，采用相应前后两年平均值填充
+var mvc_grow_to_fill=ee.ImageCollection.fromImages(ee.List([mvc_grow_last_year,mvc_grow_next_year])).mean();
+
+var mvc_grow_mask=mvc_2020.mask();
+var mvc_grow_last_year_mask=mvc_grow_last_year.mask();
+var mvc_grow_next_year_mask=mvc_grow_next_year.mask();
+
+var mvc_grow_fill_place=(mvc_grow_mask.eq(0)).and(mvc_grow_last_year_mask.neq(0)).and(mvc_grow_next_year_mask.neq(0)).selfMask();
+var mvc_grow_filled=mvc_2020.unmask(mvc_grow_fill_place).where(mvc_grow_fill_place,mvc_grow_to_fill);
+
+//1：（5）计算生长季反照率、植被、土壤指标
+var tz_grow=cal_indexes(mvc_grow_filled);
+
+//2：（1）合成当年非生长季平均值影像
+var start_date_ungrow=ee.Date.fromYMD(year,1,1);
+var end_date_ungrow=ee.Date.fromYMD(year,4,30);
+var lat8_col_non=landsat_sr.filterDate(start_date_ungrow,end_date_ungrow).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_non_grow=lat8_col_non.reduce(ee.Reducer.mean()).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi']);
+
+//2：（2）合成前一年非生长季平均值影像
+var start_date_ungrow_last_year=ee.Date.fromYMD(year,1,1).advance(-1,'year');
+var end_date_ungrow_last_year=ee.Date.fromYMD(year,4,30).advance(-1,'year');
+var lat8_col_non_last_year=landsat_sr.filterDate(start_date_ungrow_last_year,end_date_ungrow_last_year).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_non_grow_last_year=lat8_col_non_last_year.reduce(ee.Reducer.mean()).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi']);
+
+//2：（3）合成后一年非生长季平均值影像
+var start_date_ungrow_next_year=ee.Date.fromYMD(year,1,1).advance(1,'year');
+var end_date_ungrow_next_year=ee.Date.fromYMD(year,4,30).advance(1,'year');
+var lat8_col_non_next_year=landsat_sr.filterDate(start_date_ungrow_next_year,end_date_ungrow_next_year).filterBounds(roi).map(maskCloudsL8).select(['B','G','R','NIR','SWIR1','SWIR2'])
+.map(l8dn2sr).map(sr_OLI2ETM).map(function(img){
+  img= ee.Image(img);
+  var NIR=img.select('NIR');
+  var RED=img.select('R');
+  var NDVI=(NIR.subtract(RED)).divide(NIR.add(RED)).rename(['ndvi']);
+  
+  return img.addBands(NDVI,['ndvi']);
+});
+var mvc_non_grow_next_year=lat8_col_non_next_year.reduce(ee.Reducer.mean()).rename(['B','G','R','NIR','SWIR1','SWIR2','ndvi']);
+
+//2：（4）当年生长季平均值影像缺失的像素，采用相应前后两年平均值填充
+var mvc_non_grow_to_fill=ee.ImageCollection.fromImages(ee.List([mvc_non_grow_last_year,mvc_non_grow_next_year])).mean();
+var mvc_non_grow_mask=mvc_non_grow.mask();
+var mvc_non_grow_last_year_mask=mvc_non_grow_last_year.mask();
+var mvc_non_grow__next_year_mask=mvc_non_grow_next_year.mask();
+
+var mvc_non_grow_fill_place=(mvc_non_grow_mask.eq(0)).and(mvc_non_grow_last_year_mask.neq(0)).and(mvc_non_grow__next_year_mask.neq(0)).selfMask();
+
+var mvc_non_grow_filled=mvc_non_grow.unmask(mvc_non_grow_fill_place).where(mvc_non_grow_fill_place,mvc_non_grow_to_fill);
+Map.addLayer(mvc_non_grow,{},'mvc_non_grow');
+Map.addLayer(mvc_non_grow_filled,{},'mvc_non_grow_filled');
+
+//2：（5）计算非生长季反照率、植被、土壤指标
+var tz_non_grow=cal_indexes_non_growing(mvc_non_grow_filled);
+
+//3：计算纹理特征
+var tz_wl2=cal_indexes_texture2(mvc_grow_filled);
+// var tz_wl2=WenLi_2019.float().divide(1000);
+
+//4：计算地形特征
+// var slope_china=SlopeSanbei.rename('slope').float().divide(1000);
+// var GaoCha=GaoChaSanBei.rename(['GaoCha_30x','GaoCha_60x','GaoCha_90x']);
+// var DEM_Std=DemStdSanBei.rename(['DEM_Std_30','DEM_Std_60','DEM_Std_90']).float().divide(1000);
+// var DdXing_tz=slope_china.addBands(GaoCha).addBands(DEM_Std);
+
+var roi_dem=dem_30m.clip(roi);
+var slope_china=ee.Terrain.slope(roi_dem).rename('slope');
+var Min_Max_30x30=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.minMax(),
+  kernel:ee.Kernel.fixed({
+    width:30,
+    height:30,
+    weights:ee.List.repeat(ee.List.repeat(1,30),30)
+  })
+});
+var Min_Max_60x60=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.minMax(),
+  kernel:ee.Kernel.fixed({
+    width:60,
+    height:60,
+    weights:ee.List.repeat(ee.List.repeat(1,60),60)
+  })
+});
+var Min_Max_90x90=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.minMax(),
+  kernel:ee.Kernel.fixed({
+    width:90,
+    height:90,
+    weights:ee.List.repeat(ee.List.repeat(1,90),90)
+  })
+});
+var GaoCha_30x30=((Min_Max_30x30.select('elevation_max')).subtract(Min_Max_30x30.select('elevation_min'))).rename('GaoCha_30x');
+var GaoCha_60x60=((Min_Max_60x60.select('elevation_max')).subtract(Min_Max_60x60.select('elevation_min'))).rename('GaoCha_60x');
+var GaoCha_90x90=((Min_Max_90x90.select('elevation_max')).subtract(Min_Max_90x90.select('elevation_min'))).rename('GaoCha_90x');
+var GaoCha=GaoCha_30x30.addBands(GaoCha_60x60).addBands(GaoCha_90x90);
+var DEM_Std_30x30=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.stdDev(),
+  kernel:ee.Kernel.fixed({
+    width:30,
+    height:30,
+    weights:ee.List.repeat(ee.List.repeat(1,30),30)
+  })
+}).rename('DEM_Std_30');
+var DEM_Std_60x60=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.stdDev(),
+  kernel:ee.Kernel.fixed({
+    width:60,
+    height:60,
+    weights:ee.List.repeat(ee.List.repeat(1,60),60)
+  })
+}).rename('DEM_Std_60');
+var DEM_Std_90x90=roi_dem.reduceNeighborhood({
+  reducer:ee.Reducer.stdDev(),
+  kernel:ee.Kernel.fixed({
+    width:90,
+    height:90,
+    weights:ee.List.repeat(ee.List.repeat(1,90),90)
+  })
+}).rename('DEM_Std_90');
+var DEM_Std=DEM_Std_30x30.addBands(DEM_Std_60x60).addBands(DEM_Std_90x90);
+var DdXing_tz=slope_china.addBands(GaoCha).addBands(DEM_Std);
+
+
+//5：合并各组特征作为输入影像
+var input_img=tz_grow.addBands(tz_non_grow).addBands(tz_wl2).addBands(DdXing_tz);
+
+//6：（1）读取样本,并移除迁移误差点（需要根据具体情况修改）
+var samples_0=Yangben_MushiBuChongCaodi12Yue_DuoNian_v2;
+var samples=samples_0.filter(ee.Filter.neq('type30m',0)).filterBounds(s_north);
+
+var sample_QZ=HeBing_YangBen_QZ_DuoNian;
+var sample_YH=Yangben_Yanhai_DuoNian
+
+//6：（2）剔除缺失特征值样本
+samples=samples.filter(ee.Filter.expression("B!=0"));
+sample_QZ=sample_QZ.filter(ee.Filter.expression("B!=0"));
+//6：(3) 筛选当年样本或稳定样本（需要根据具体情况修改）
+// var samples_v1=samples;
+// var samples_v1=ee.FeatureCollection(ee.List([samples])).flatten();
+var samples_v1=ee.FeatureCollection(ee.List([samples,sample_YH,sample_QZ])).flatten();
+print('samples_v1',samples_v1);
+
+//7：（1）选择输入特征
+var label_name='type30m';
+var lsr_features=ee.List(['B','G','R','NIR','SWIR1','SWIR2','albedo']);
+
+var vegetation_features=ee.List(['ndvi','savi','msavi','rvi','dvi','evi']);
+
+var soil_features=ee.List(['bsi','dbsi','mbi','tgsi','ndmi','si']);
+
+var ungrowing_seasons=ee.List(['n_B','n_G','n_R','n_NIR','n_SWIR1','n_SWIR2','n_albedo','n_ndvi','n_savi','n_msavi','n_bsi','n_dbsi','n_mbi','n_tgsi','n_ndmi','n_si']);
+
+var ungrowing_seasons_lsr=ee.List(['n_B','n_G','n_R','n_NIR','n_SWIR1','n_SWIR2','n_albedo']);
+var ungrowing_seasons_vegetation=ee.List(['n_ndvi','n_savi','n_msavi']);
+var ungrowing_seasons_soil=ee.List(['n_bsi','n_dbsi','n_mbi','n_tgsi','n_ndmi','n_si']);
+
+var texture_features2=ee.List(['V3_corr','V3_hom','V3_ent','H3_corr','H3_hom','H3_ent',
+                              'V6_corr','V6_hom','V6_ent','H6_corr','H6_hom','H6_ent']);
+
+var dem_features=ee.List(['slope','DEM_Std_30','DEM_Std_60','DEM_Std_90','GaoCha_30x','GaoCha_60x','GaoCha_90x']);
+
+// var features_name=ee.List([lsr_features,vegetation_features,soil_features,ungrowing_seasons,texture_features2,dem_features]).flatten();
+var features_name=ee.List([lsr_features,vegetation_features,soil_features,ungrowing_seasons]).flatten();      // 去掉地形纹理
+
+
+print('features_name',features_name);
+
+samples=samples.select(features_name.add(label_name));
+input_img=input_img.select(features_name);
+
+//7：（2）随机森林参数设置
+var tree_num=100;
+var bag=0.5;
+
+//7：（3）训练并分类
+print('result_v1');
+var class_info_v1=single_class_v2(samples_v1,input_img,label_name,features_name,tree_num,bag);
+print('oa',ee.Dictionary(class_info_v1.get('classinfo')).get('oa'));
+
+print('class_info',ee.Dictionary(class_info_v1.get('classinfo')));
+
+print('matrix',ee.Dictionary(class_info_v1.get('classinfo')).get('matrix'));
+
+var classified_v1=ee.Image(class_info_v1.get('res'));
+
+var train_sample=ee.FeatureCollection(class_info_v1.get('train_sample')).map(function(element){return ee.Feature(element).set({'Used':'Train'})});
+var test_sample=ee.FeatureCollection(class_info_v1.get('test_sample')).map(function(element){return ee.Feature(element).set({'Used':'Test'})});
+
+print(train_sample);
+print(test_sample);
+
+Map.addLayer(classified_v1,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'classified_v1');
+
+
+//7：（4）导出分类结果
+Export.image.toDrive({
+  image:classified_v1,
+  description:'class_Yanhai_'+String(year)+'_v3_noWL',
+  folder:'smh/',
+  // pyramidingPolicy:'mode',
+  region:roi,
+  scale:30,
+  maxPixels:1e13,
+  crs :'EPSG:4326',
+  priority:9999
+});
+
+Export.table.toDrive({
+  collection:train_sample,
+  description:'DuoNian_v2_train_sample_FF2_QZ_v2',
+  folder:'smh/'
+});
+
+Export.table.toDrive({
+  collection:test_sample,
+  description:'DuoNian_v2_test_sample_FF2_QZ_v2',
+  folder:'smh/'
+});
+
+
+//7：（5）存储纹理特征至asset
+// var tz_wl2_export=tz_wl2.multiply(1000).int();
+// Export.image.toAsset({
+//   image:tz_wl2_export,
+//   description:'tz_wl2_2009',
+//   assetId:'projects/ee-dragon-v9/assets/WenLi_2009',
+//   region:roi,
+//   scale:30,
+//   maxPixels:1e13,
+//   crs :'EPSG:4326',
+//   priority:10
+// });
+ 
+
+ 
+     
