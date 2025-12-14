@@ -1,0 +1,118 @@
+var roi=Yanhai;
+// var img_DangNian=class_2001_DuoNian_v2;
+// var img_QuNian=class_2000_DuoNian_v2;
+// var img_Xia1Nian=class_2001_DuoNian_v2;
+// var img_Xia2Nian=class_2002_DuoNian_v2;
+
+function post_process(img_DangNian,img_QuNian,img_Xia1Nian,img_Xia2Nian){
+  var QuNian_YouXiao=img_QuNian.mask();
+  var Mask_DnagNian_BuTong_QuNian=img_DangNian.neq(img_QuNian);
+  Mask_DnagNian_BuTong_QuNian=Mask_DnagNian_BuTong_QuNian.and(QuNian_YouXiao);
+  
+  var spatial_sernel=ee.Kernel.fixed({
+    width:3,
+    height:3,
+    weights:ee.List([[1,1,1],[1,1,1],[1,1,1]])
+  });
+  
+  var img_DangNian_3x3=img_DangNian.neighborhoodToBands(spatial_sernel);
+  var img_Xia1Nian_3x3=img_Xia1Nian.neighborhoodToBands(spatial_sernel);
+  var img_Xia2Nian_3x3=img_Xia2Nian.neighborhoodToBands(spatial_sernel);
+  
+  var SanNian_3x3=img_DangNian_3x3.addBands(img_Xia1Nian_3x3).addBands(img_Xia2Nian_3x3);
+  SanNian_3x3=SanNian_3x3.updateMask(Mask_DnagNian_BuTong_QuNian);
+  
+  var ShiKongYiZhi=(SanNian_3x3.eq(img_DangNian)).reduce(ee.Reducer.sum()).divide(27);
+  var ShiKongYiZhi_XiaoYu0Dot5=ShiKongYiZhi.lt(0.5).selfMask();
+  
+  Map.addLayer(SanNian_3x3,{},'SanNian_3x3');
+  Map.addLayer(ShiKongYiZhi,{},'ShiKongYiZhi');
+  Map.addLayer(ShiKongYiZhi_XiaoYu0Dot5,{},'ShiKongYiZhi_XiaoYu0Dot5');
+  
+  var img_DangNian_posted=img_DangNian.where(ShiKongYiZhi_XiaoYu0Dot5,img_QuNian);
+  return img_DangNian_posted;
+}
+
+
+
+// var class_DangNian_DuoNian_v2_posted=post_process(img_DangNian,img_QuNian,img_Xia1Nian,img_Xia2Nian);
+
+
+// Export.image.toDrive({
+//   image:class_DangNian_DuoNian_v2_posted,
+//   region:roi,
+//   scale:30,
+//   folder:'smh/',
+//   description:'class_2000_DuoNian_v2_HCL',
+//   maxPixels:1e13,
+//   crs:'EPSG:4326'
+// });
+
+// var res_list=ee.List([class_1999_DuoNian_v2,class_2000_DuoNian_v2,class_2001_DuoNian_v2,class_2002_DuoNian_v2,class_2003_DuoNian_v2,class_2004_DuoNian_v2
+// ,class_2005_DuoNian_v2,class_2006_DuoNian_v2,class_2007_DuoNian_v2,class_2008_DuoNian_v2,class_2009_DuoNian_v2,class_2010_DuoNian_v2,class_2011_DuoNian_v2,
+// class_2012_DuoNian_v2,class_2013_DuoNian_v2,class_2014_DuoNian_v2,class_2015_DuoNian_v2,class_2016_DuoNian_v2,class_2017_DuoNian_v2,class_2018_DuoNian_v2,
+// class_2019_DuoNian_v2,class_2020_DuoNian_v2,class_2021_DuoNian_v2,class_2022_DuoNian_v2,class_2023_DuoNian_v2,class_2024_DuoNian_v2]);
+
+// for (var i=21;i<24;i++){000000369
+
+//   var img_DangNian=ee.Image(res_list.get(ee.Number(i)));
+//   var img_QuNian=ee.Image(res_list.get(ee.Number(i).subtract(1)));
+//   var img_Xia1Nian=ee.Image(res_list.get(ee.Number(i).add(1)));
+//   var img_Xia2Nian=ee.Image(res_list.get(ee.Number(i).add(2)));
+//   var year=i+1999;
+
+// var res_list=ee.List([class_Yanhai_2019_v2, class_Yanhai_2020_v2, class_Yanhai_2021_v2, class_Yanhai_2022_v2]);
+
+// for (var i=1;i<2;i++){
+//   var img_DangNian=ee.Image(res_list.get(ee.Number(i)));
+//   var img_QuNian=ee.Image(res_list.get(ee.Number(i).subtract(1)));
+//   var img_Xia1Nian=ee.Image(res_list.get(ee.Number(i).add(1)));
+//   var img_Xia2Nian=ee.Image(res_list.get(ee.Number(i).add(2)));
+//   var year=i+2019;  
+
+
+var res_list=ee.List([class_Yanhai_1999_v3_noWL,class_Yanhai_2000_v3_noWL,class_Yanhai_2001_v3_noWL,class_Yanhai_2002_v3_noWL,class_Yanhai_2003_v3_noWL,
+class_Yanhai_2004_v3_noWL,class_Yanhai_2005_v3_noWL,class_Yanhai_2006_v3_noWL,class_Yanhai_2007_v3_noWL,class_Yanhai_2008_v3_noWL,class_Yanhai_2009_v3_noWL,
+class_Yanhai_2010_v3_noWL,class_Yanhai_2011_v3_noWL,class_Yanhai_2012_v3_noWL,class_Yanhai_2013_v3_noWL,class_Yanhai_2014_v3_noWL,class_Yanhai_2015_v3_noWL,
+class_Yanhai_2016_v3_noWL,class_Yanhai_2017_v3_noWL,class_Yanhai_2018_v3_noWL,class_Yanhai_2019_v3_noWL,class_Yanhai_2020_v3_noWL,class_Yanhai_2021_v3_noWL,
+class_Yanhai_2022_v3_noWL,class_Yanhai_2023_v3_noWL]);
+
+for (var i=0;i<23;i++){
+  var img_DangNian=ee.Image(res_list.get(ee.Number(i)));
+  var img_QuNian=ee.Image(res_list.get(ee.Number(i).subtract(1)));
+  var img_Xia1Nian=ee.Image(res_list.get(ee.Number(i).add(1)));
+  var img_Xia2Nian=ee.Image(res_list.get(ee.Number(i).add(2)));
+  var year=i+1999;
+  
+  print('year', String(year));
+  print('img_DangNian', img_DangNian);
+  print('img_QuNian', img_QuNian);
+  print('img_Xia1Nian', img_Xia1Nian);
+  print('img_Xia2Nian', img_Xia2Nian);
+
+
+  var class_DangNian_DuoNian_v2_posted=post_process(img_DangNian,img_QuNian,img_Xia1Nian,img_Xia2Nian);
+  Export.image.toDrive({
+    image:class_DangNian_DuoNian_v2_posted,
+    region:roi,
+    scale:30,
+    folder:'smh/',
+    description:'class_'+String(year)+'_DuoNian_v3_noWL_HCL',
+    maxPixels:1e13,
+    crs:'EPSG:4326'
+  });
+  
+}
+
+
+// Map.addLayer(class_1999_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_1999_DuoNian_v2');
+// Map.addLayer(class_2009_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2009_DuoNian_v2');
+// Map.addLayer(class_2010_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2010_DuoNian_v2');
+// Map.addLayer(class_2011_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2011_DuoNian_v2');
+// Map.addLayer(class_2012_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2012_DuoNian_v2');
+// Map.addLayer(class_2018_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2018_DuoNian_v2');
+// Map.addLayer(class_2019_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2019_DuoNian_v2');
+// Map.addLayer(class_2020_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2020_DuoNian_v2');
+// Map.addLayer(class_2021_DuoNian_v2,{min:1,max:4,palette:['#FF0000','#FFFF00','#008000','#A9A9A9']},'class_2021_DuoNian_v2');
+
+
